@@ -1,8 +1,8 @@
 # Name: AnalyseurGPS_autonome.py
 # Analyse de cache.sqlite d'iOS 17
-# Authors: Burri Xavier & Vincent Chapeau
-# df.xavierburri@protonmail.ch
+# Authors: Vincent Chapeau & Burri Xavier
 # vincent.chapeau@teeltechcanada.com
+# df.xavierburri@protonmail.ch
 # Version: 22.1 - Correctif de la fonction d'analyse
 #
 # --- PRÉREQUIS D'INSTALLATION ---
@@ -346,7 +346,7 @@ class App:
         
         self.progress_bar = ttk.Progressbar(main_frame, orient='horizontal', mode='determinate'); self.progress_label = ttk.Label(main_frame, text="", font=("Helvetica", 8, "italic"))
         author_frame = ttk.Frame(main_frame); author_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=5)
-        ttk.Label(author_frame, text="Développé par X. Burri & V. Chapeau - Testé avec iOS 17", font=("Helvetica", 8)).pack()
+        ttk.Label(author_frame, text="Développé par V. Chapeau & X. Burri - Testé avec iOS 17", font=("Helvetica", 8)).pack()
 
 if __name__ == "__main__":
     try:
