@@ -1,8 +1,8 @@
 # Name: AnalyseurGPS_autonome.py
-# Analyse de cache.sqlite d'iOS - CORRECTION ERREUR SQL & INTERFACE
+# Analyse de cache.sqlite d'iOS - AMÉLIORATIONS FINALES
 # Authors: Vincent Chapeau & Burri Xavier
 # Finalisation & Stabilité: Gemini
-# Version: 0.65.0 - Correction crash Folium (TimestampedGeoJson)
+# Version: 0.70.0 - Correction popups sur calque direction
 
 import sqlite3
 import folium
@@ -68,7 +68,7 @@ def run_analysis(devices, base_output_path, start_ts, end_ts, accuracy_threshold
                         df_trajets = pd.read_sql_query(query, conn, params=params)
                         if not df_trajets.empty: df_trajets['Source'] = 'Trajet'
                 
-                # --- TRAJETS (ANCIEN - ZRTLEARNEDLOCATIONOFINTERESTMO) - CORRECTION ERREUR SQL ---
+                # --- TRAJETS (ANCIEN - ZRTLEARNEDLOCATIONOFINTERESTMO) ---
                 if df_trajets.empty and 'ZRTLEARNEDLOCATIONOFINTERESTMO' in tables_in_db:
                     cursor.execute("PRAGMA table_info(ZRTLEARNEDLOCATIONOFINTERESTMO);")
                     cols = {c[1].upper() for c in cursor.fetchall()}
@@ -128,16 +128,20 @@ def run_analysis(devices, base_output_path, start_ts, end_ts, accuracy_threshold
     df_export = pd.DataFrame()
     df_export['Appareil_ID'] = combined_df['id']
     df_export['Source'] = combined_df['Source']
-    df_export['Timestamp_Local'] = combined_df['Timestamp_UTC'].dt.tz_convert(local_tz).dt.strftime('%Y-%m-%d %H:%M:%S')
-    df_export['Timestamp_UTC_ISO'] = combined_df['Timestamp_UTC'].dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+    df_export['Timestamp_Local'] = combined_df['Timestamp_UTC'].dt.tz_convert(local_tz).dt.strftime('%Y-%m-%d %H:%M:%S.%f').str[:-3]
+    df_export['Timestamp_UTC_ISO'] = combined_df['Timestamp_UTC'].dt.strftime('%Y-%m-%dT%H:%M:%S.%f').str[:-3] + 'Z'
     df_export['Latitude'] = combined_df['LAT']
     df_export['Longitude'] = combined_df['LONG']
     df_export['Altitude_m'] = combined_df.get('ALTITUDE')
-    df_export['Vitesse_kmh'] = combined_df.get('SPEED', pd.Series(dtype='float')) * 3.6
-    df_export['Direction_deg'] = combined_df.get('COURSE')
+    
+    speed_ms = combined_df.get('SPEED', pd.Series(dtype='float'))
+    df_export['Vitesse_kmh'] = np.where(speed_ms < 0, np.nan, speed_ms * 3.6)
+    
+    course_deg = combined_df.get('COURSE', pd.Series(dtype='float'))
+    df_export['Direction_deg'] = np.where(course_deg < 0, np.nan, course_deg)
+    
     df_export['Precision_GPS_m'] = combined_df.get('ACCURACY')
 
-    # --- FILTRAGE FINAL ---
     progress_callback(38, "Filtrage des données...")
     if min_speed is not None:
         df_export = df_export[df_export['Vitesse_kmh'] >= min_speed]
@@ -160,7 +164,7 @@ def run_analysis(devices, base_output_path, start_ts, end_ts, accuracy_threshold
                     merged['distance_m'] = merged.apply(lambda row: haversine(row['Latitude_1'], row['Longitude_1'], row['Latitude_2'], row['Longitude_2']), axis=1)
                     proximite_df = merged[merged['distance_m'] <= cross_ref_dist]
                     for _, row in proximite_df.iterrows():
-                        croisements.append({'Timestamp_Local': row.name.tz_convert(local_tz).strftime('%Y-%m-%d %H:%M:%S'), 'Appareil_1': dev1_id, 'Appareil_2': dev2_id, 'Latitude': (row['Latitude_1'] + row['Latitude_2']) / 2, 'Longitude': (row['Longitude_1'] + row['Longitude_2']) / 2, 'Distance_m': row['distance_m']})
+                        croisements.append({'Timestamp_Local': row.name.tz_convert(local_tz).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3], 'Appareil_1': dev1_id, 'Appareil_2': dev2_id, 'Latitude': (row['Latitude_1'] + row['Latitude_2']) / 2, 'Longitude': (row['Longitude_1'] + row['Longitude_2']) / 2, 'Distance_m': row['distance_m']})
         if croisements:
             df_croisements = pd.DataFrame(croisements); df_croisements.to_csv(base_output_path + "_croisements.csv", index=False, sep=';', encoding='utf-8-sig')
 
@@ -175,7 +179,8 @@ def run_analysis(devices, base_output_path, start_ts, end_ts, accuracy_threshold
                 pnt = folder.newpoint(name=row['Timestamp_Local'][11:])
                 pnt.coords = [(float(row['Longitude']), float(row['Latitude']), float(row['Altitude_m']) if pd.notna(row['Altitude_m']) else 0.0)]
                 pnt.extendeddata = simplekml.ExtendedData()
-                pnt.extendeddata.newdata('Source', value=str(row['Source'])); pnt.extendeddata.newdata('Vitesse', value=str(format_value(row['Vitesse_kmh'], ' km/h')))
+                pnt.extendeddata.newdata('Timestamp', value=str(row['Timestamp_Local']))
+                pnt.extendeddata.newdata('Vitesse', value=str(format_value(row['Vitesse_kmh'], ' km/h')))
         kml.save(base_output_path + ".kml")
 
     if export_html:
@@ -184,27 +189,32 @@ def run_analysis(devices, base_output_path, start_ts, end_ts, accuracy_threshold
         all_points_for_bounds = [];
         device_colors = {dev_id: color for dev_id, color in zip(df_export['Appareil_ID'].unique(), ['blue', 'red', 'green', 'purple', 'orange', 'darkred'])}
         
-        # --- COUCHE D'ANIMATION (doit être ajoutée directement à la carte) ---
         animation_features = []
-        for device_id, group in df_export.groupby('Appareil_ID'):
-            color = device_colors.get(device_id, 'gray')
-            for _, row in group.iterrows():
-                animation_features.append({
-                    'type': 'Feature',
-                    'geometry': { 'type': 'Point', 'coordinates': [row['Longitude'], row['Latitude']] },
-                    'properties': {
-                        'time': row['Timestamp_UTC_ISO'], 'icon': 'circle',
-                        'iconstyle': { 'color': color, 'fillColor': color, 'fillOpacity': 0.8, 'radius': 5 },
-                        'popup': f"<b>{device_id}</b><br>{row['Timestamp_Local']}<br>Source: {row['Source']}"
-                    }
-                })
+        for _, row in df_export.iterrows():
+            popup_html = f"""
+            <div style="max-width: 300px;">
+            <b>Appareil:</b> {row['Appareil_ID']}<br>
+            <b>Date & Heure ({selected_timezone.split('/')[-1]}):</b><br>{row['Timestamp_Local']}<br>
+            <b>Vitesse:</b> {format_value(row['Vitesse_kmh'], ' km/h')}<br>
+            <b>Direction:</b> {format_value(row['Direction_deg'], '°')}<br>
+            <b>Altitude:</b> {format_value(row['Altitude_m'], ' m')}<br>
+            <b>Précision:</b> ±{format_value(row['Precision_GPS_m'], ' m')}
+            </div>
+            """
+            animation_features.append({
+                'type': 'Feature', 'geometry': { 'type': 'Point', 'coordinates': [row['Longitude'], row['Latitude']] },
+                'properties': {
+                    'time': row['Timestamp_UTC_ISO'], 'icon': 'circle',
+                    'popup': popup_html,
+                    'iconstyle': { 'color': device_colors.get(row['Appareil_ID']), 'fillColor': device_colors.get(row['Appareil_ID']), 'fillOpacity': 0.8, 'radius': 5 },
+                }
+            })
         if animation_features:
             TimestampedGeoJson({'type': 'FeatureCollection', 'features': animation_features},
-                                period='PT1H', add_last_point=True, auto_play=False, loop=False, 
+                                period='PT1M', add_last_point=True, auto_play=False, loop=False, 
                                 max_speed=10, loop_button=True, date_options='YYYY/MM/DD HH:mm:ss',
-                                time_slider_drag_update=True).add_to(m) # CORRECTION: Ajout direct à 'm'
+                                time_slider_drag_update=True).add_to(m)
 
-        # --- COUCHES STATIQUES PAR APPAREIL ---
         for device_id, group in df_export.groupby('Appareil_ID'):
             color = device_colors.get(device_id, 'gray')
             trajet_group = group[group['Source'].str.contains('Trajet')]
@@ -221,12 +231,33 @@ def run_analysis(devices, base_output_path, start_ts, end_ts, accuracy_threshold
             folium.PolyLine(locations=points, color=color, weight=2.5, opacity=0.8).add_to(fg_lines)
 
             for _, row in trajet_group.iterrows():
-                folium.CircleMarker(location=[row['Latitude'], row['Longitude']], radius=3, color=color, fill=True, fill_color=color).add_to(fg_points)
+                # Création du popup détaillé pour tous les calques
+                popup_html = f"""
+                <div style="max-width: 300px;">
+                <b>Appareil:</b> {row['Appareil_ID']}<br>
+                <b>Date & Heure ({selected_timezone.split('/')[-1]}):</b><br>{row['Timestamp_Local']}<br>
+                <b>Vitesse:</b> {format_value(row['Vitesse_kmh'], ' km/h')}<br>
+                <b>Direction:</b> {format_value(row['Direction_deg'], '°')}<br>
+                <b>Altitude:</b> {format_value(row['Altitude_m'], ' m')}<br>
+                <b>Précision:</b> ±{format_value(row['Precision_GPS_m'], ' m')}
+                </div>
+                """
+                folium.CircleMarker(
+                    location=[row['Latitude'], row['Longitude']], 
+                    radius=3, color=color, fill=True, fill_color=color,
+                    popup=folium.Popup(popup_html, max_width=300)
+                ).add_to(fg_points)
                 if pd.notna(row['Precision_GPS_m']) and row['Precision_GPS_m'] > 0:
                     folium.Circle(location=[row['Latitude'], row['Longitude']], radius=row['Precision_GPS_m'], color='blue', weight=1, fill=True, fill_color='blue', fill_opacity=0.2).add_to(fg_accuracy)
-                if pd.notna(row['Direction_deg']) and row['Direction_deg'] >= 0:
+                
+                # CORRECTION: Le popup est ajouté à la flèche de direction
+                if pd.notna(row['Direction_deg']): # On vérifie juste que la valeur existe (pas négative)
                     arrow_svg = f'<div style="transform: rotate({int(row["Direction_deg"])}deg); transform-origin: center;"><svg viewBox="0 0 24 24" fill="{color}" width="24px" height="24px"><path d="M12 2L2.5 21.5 12 17 21.5 21.5z"/></svg></div>'
-                    folium.Marker(location=[row['Latitude'], row['Longitude']], icon=DivIcon(icon_size=(24,24), icon_anchor=(12,12), html=arrow_svg)).add_to(fg_direction)
+                    folium.Marker(
+                        location=[row['Latitude'], row['Longitude']], 
+                        icon=DivIcon(icon_size=(24,24), icon_anchor=(12,12), html=arrow_svg),
+                        popup=folium.Popup(popup_html, max_width=300)
+                    ).add_to(fg_direction)
             
             m.add_child(fg_lines); m.add_child(fg_points); m.add_child(fg_accuracy); m.add_child(fg_direction)
         
@@ -272,19 +303,12 @@ Filtres appliqués:
 
 DESCRIPTION DES COUCHES (CARTE .HTML)
 -------------------------------------
-- **Animation des Trajets (Toujours visible):** Affiche les points de tous les appareils de manière chronologique. Utilisez la ligne de temps en bas pour naviguer.
+- **Animation des Trajets (Toujours visible):** Affiche les points de tous les appareils de manière chronologique. Cliquez sur un point pour voir ses détails. Utilisez la ligne de temps en bas pour naviguer (le curseur avance minute par minute).
 - **Tracé (Lignes) (Activé par défaut):** Dessine une ligne continue reliant les points de trajet pour chaque appareil.
-- **Points de Trajet (Désactivé par défaut):** Affiche un petit marqueur sur chaque coordonnée GPS enregistrée.
-- **Directions (Angles) (Désactivé par défaut):** Montre une flèche sur chaque point indiquant le cap de l'appareil à ce moment.
+- **Points de Trajet (Désactivé par défaut):** Affiche un petit marqueur sur chaque coordonnée. Cliquez pour voir les détails.
+- **Directions (Angles) (Désactivé par défaut):** Montre une flèche sur chaque point indiquant le cap de l'appareil. Cliquez sur la flèche pour voir les détails.
 - **Précision (Cercles) (Désactivé par défaut):** Dessine un cercle bleu autour de chaque point représentant la marge d'erreur de la localisation.
 - **Points de Croisement (Activé par défaut):** Marque les endroits où deux appareils se sont trouvés à proximité.
-
-SOURCES DE DONNÉES ET LEUR SIGNIFICATION
--------------------------------------
-- **Trajet (ZRTCLLocationMO):** Enregistrement fréquent et précis des points GPS lors d'un déplacement.
-- **Lieu Visité (ZRTVISITMO):** Point unique marquant un lieu où l'appareil a stationné pendant une certaine durée.
-- **Indice (ZRTHINTMO):** Localisations moins précises collectées par iOS pour diverses raisons (suggestions Siri, etc.).
-- **Trajet (Ancien):** Source de données d'anciennes versions d'iOS.
 """
     with open(base_output_path + "_readme.txt", "w", encoding="utf-8") as f: f.write(readme_content)
     
@@ -314,11 +338,11 @@ def createToolTip(widget, text):
 
 class App:
     def __init__(self, root):
-        self.root = root; self.root.title("Analyseur GPS iOS - v0.65.0"); self.root.minsize(550, 750)
+        self.root = root; self.root.title("Analyseur GPS iOS - v0.70.0"); self.root.minsize(550, 750)
         self.devices, self.last_output_dir = [], None
         self.is_multi_mode = tk.BooleanVar(value=False); self.is_multi_mode.trace_add("write", self.toggle_mode)
         self.single_db_path, self.output_path = tk.StringVar(), tk.StringVar()
-        self.accuracy = tk.StringVar(value="") # Par défaut: vide
+        self.accuracy = tk.StringVar(value="")
         self.min_speed_var, self.max_speed_var = tk.StringVar(value=""), tk.StringVar(value="")
         self.timezone = tk.StringVar(value="Europe/Brussels")
         self.export_html, self.export_csv, self.export_kml, self.export_graph = tk.BooleanVar(value=True), tk.BooleanVar(value=True), tk.BooleanVar(value=True), tk.BooleanVar(value=True)
@@ -358,19 +382,13 @@ class App:
         for device in self.devices: self.device_list.insert('', 'end', values=(device['id'], device['path']))
 
     def toggle_mode(self, *args):
-        # Place all frames in a list in the correct order
         all_frames = [
             self.mode_frame, self.single_db_frame, self.multi_db_frame,
             self.date_frame, self.settings_frame, self.output_frame, 
             self.cross_ref_frame, self.action_frame
         ]
-        # Forget all of them to ensure a clean slate
-        for frame in all_frames:
-            frame.pack_forget()
-
+        for frame in all_frames: frame.pack_forget()
         is_multi = self.is_multi_mode.get()
-        
-        # Repack them in the correct order based on the mode
         self.mode_frame.pack(fill=tk.X, pady=5)
         if is_multi:
             self.multi_db_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
@@ -381,9 +399,13 @@ class App:
         self.output_frame.pack(fill=tk.X, pady=5)
         if is_multi:
             self.cross_ref_frame.pack(fill=tk.X, pady=5)
-        
         self.action_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=(10,0))
 
+    def _auto_focus(self, var, next_widget):
+        if len(var.get()) >= 2:
+            var.set(var.get()[:2])
+            next_widget.focus_set()
+            next_widget.selection_range(0, 'end')
 
     def start_analysis(self):
         project_name_base = self.output_path.get()
@@ -417,7 +439,7 @@ class App:
             start_dt = datetime(start_date_obj.year, start_date_obj.month, start_date_obj.day, int(self.start_hour_var.get() or 0), int(self.start_min_var.get() or 0), int(self.start_sec_var.get() or 0)).replace(tzinfo=tz)
             end_dt = datetime(end_date_obj.year, end_date_obj.month, end_date_obj.day, int(self.end_hour_var.get() or 0), int(self.end_min_var.get() or 0), int(self.end_sec_var.get() or 0)).replace(tzinfo=tz)
             utc_epoch = datetime(2001, 1, 1, tzinfo=timezone.utc)
-            start_ts, end_ts = int((start_dt.astimezone(timezone.utc) - utc_epoch).total_seconds()), int((end_dt.astimezone(timezone.utc) - utc_epoch).total_seconds())
+            start_ts, end_ts = (start_dt.astimezone(timezone.utc) - utc_epoch).total_seconds(), (end_dt.astimezone(timezone.utc) - utc_epoch).total_seconds()
             start_date_str, end_date_str = start_dt.strftime('%Y-%m-%d %H:%M:%S'), end_dt.strftime('%Y-%m-%d %H:%M:%S')
         except Exception as e: messagebox.showerror("Erreur de Paramètre", f"Un paramètre est invalide.\n{e}"); return
         
@@ -452,12 +474,10 @@ class App:
     def create_widgets(self):
         self.main_frame = ttk.Frame(self.root, padding="10"); self.main_frame.pack(fill=tk.BOTH, expand=True)
         
-        # --- MODE ---
         self.mode_frame = ttk.LabelFrame(self.main_frame, text="Choix du Mode", padding="10")
         ttk.Radiobutton(self.mode_frame, text="Un seul appareil", variable=self.is_multi_mode, value=False).pack(side=tk.LEFT, padx=5)
         ttk.Radiobutton(self.mode_frame, text="Plusieurs appareils (comparaison)", variable=self.is_multi_mode, value=True).pack(side=tk.LEFT, padx=5)
 
-        # --- FICHIERS SOURCE ---
         self.single_db_frame = ttk.LabelFrame(self.main_frame, text="Fichier Source", padding="10")
         ttk.Label(self.single_db_frame, text="Chemin vers cache.sqlite:").pack(fill=tk.X)
         entry_frame = ttk.Frame(self.single_db_frame); entry_frame.pack(fill=tk.X)
@@ -474,24 +494,37 @@ class App:
         ttk.Button(multi_btn_frame, text="Ajouter", command=self.add_device).pack(side=tk.LEFT, expand=True, fill=tk.X)
         ttk.Button(multi_btn_frame, text="Supprimer", command=self.remove_device).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(5,0))
 
-        # --- PÉRIODE ---
         self.date_frame = ttk.LabelFrame(self.main_frame, text="Période et Fuseau Horaire", padding="10")
         ttk.Label(self.date_frame, text="Date de début:").grid(row=0, column=0, sticky="w", pady=2)
         self.start_date = DateEntry(self.date_frame, date_pattern='yyyy-mm-dd', width=12); self.start_date.grid(row=0, column=1, sticky="w")
+        
         time_start_frame = ttk.Frame(self.date_frame); time_start_frame.grid(row=0, column=2, sticky="w", padx=10)
-        ttk.Spinbox(time_start_frame, from_=0, to=23, textvariable=self.start_hour_var, format="%02.0f", width=3).pack(side=tk.LEFT); ttk.Label(time_start_frame, text=":").pack(side=tk.LEFT)
-        ttk.Spinbox(time_start_frame, from_=0, to=59, textvariable=self.start_min_var, format="%02.0f", width=3).pack(side=tk.LEFT); ttk.Label(time_start_frame, text=":").pack(side=tk.LEFT)
-        ttk.Spinbox(time_start_frame, from_=0, to=59, textvariable=self.start_sec_var, format="%02.0f", width=3).pack(side=tk.LEFT)
+        self.start_hour_spinbox = ttk.Spinbox(time_start_frame, from_=0, to=23, textvariable=self.start_hour_var, format="%02.0f", width=3)
+        self.start_hour_spinbox.pack(side=tk.LEFT); ttk.Label(time_start_frame, text=":").pack(side=tk.LEFT)
+        self.start_min_spinbox = ttk.Spinbox(time_start_frame, from_=0, to=59, textvariable=self.start_min_var, format="%02.0f", width=3)
+        self.start_min_spinbox.pack(side=tk.LEFT); ttk.Label(time_start_frame, text=":").pack(side=tk.LEFT)
+        self.start_sec_spinbox = ttk.Spinbox(time_start_frame, from_=0, to=59, textvariable=self.start_sec_var, format="%02.0f", width=3)
+        self.start_sec_spinbox.pack(side=tk.LEFT)
+        
         ttk.Label(self.date_frame, text="Date de fin:").grid(row=1, column=0, sticky="w", pady=2)
         self.end_date = DateEntry(self.date_frame, date_pattern='yyyy-mm-dd', width=12); self.end_date.grid(row=1, column=1, sticky="w"); self.end_date.set_date(datetime.now())
+        
         time_end_frame = ttk.Frame(self.date_frame); time_end_frame.grid(row=1, column=2, sticky="w", padx=10)
-        ttk.Spinbox(time_end_frame, from_=0, to=23, textvariable=self.end_hour_var, format="%02.0f", width=3).pack(side=tk.LEFT); ttk.Label(time_end_frame, text=":").pack(side=tk.LEFT)
-        ttk.Spinbox(time_end_frame, from_=0, to=59, textvariable=self.end_min_var, format="%02.0f", width=3).pack(side=tk.LEFT); ttk.Label(time_end_frame, text=":").pack(side=tk.LEFT)
-        ttk.Spinbox(time_end_frame, from_=0, to=59, textvariable=self.end_sec_var, format="%02.0f", width=3).pack(side=tk.LEFT)
+        self.end_hour_spinbox = ttk.Spinbox(time_end_frame, from_=0, to=23, textvariable=self.end_hour_var, format="%02.0f", width=3)
+        self.end_hour_spinbox.pack(side=tk.LEFT); ttk.Label(time_end_frame, text=":").pack(side=tk.LEFT)
+        self.end_min_spinbox = ttk.Spinbox(time_end_frame, from_=0, to=59, textvariable=self.end_min_var, format="%02.0f", width=3)
+        self.end_min_spinbox.pack(side=tk.LEFT); ttk.Label(time_end_frame, text=":").pack(side=tk.LEFT)
+        self.end_sec_spinbox = ttk.Spinbox(time_end_frame, from_=0, to=59, textvariable=self.end_sec_var, format="%02.0f", width=3)
+        self.end_sec_spinbox.pack(side=tk.LEFT)
+        
+        self.start_hour_var.trace_add("write", lambda *args: self._auto_focus(self.start_hour_var, self.start_min_spinbox))
+        self.start_min_var.trace_add("write", lambda *args: self._auto_focus(self.start_min_var, self.start_sec_spinbox))
+        self.end_hour_var.trace_add("write", lambda *args: self._auto_focus(self.end_hour_var, self.end_min_spinbox))
+        self.end_min_var.trace_add("write", lambda *args: self._auto_focus(self.end_min_var, self.end_sec_spinbox))
+
         ttk.Label(self.date_frame, text="Fuseau Horaire:").grid(row=2, column=0, sticky="w", pady=(10,2))
         tz_combo = ttk.Combobox(self.date_frame, textvariable=self.timezone, values=sorted(available_timezones()), width=30); tz_combo.grid(row=2, column=1, columnspan=2, sticky="ew")
 
-        # --- FILTRES & EXPORTS ---
         self.settings_frame = ttk.LabelFrame(self.main_frame, text="Filtres et Formats d'Export (laisser vide pour tout inclure)", padding="10")
         ttk.Label(self.settings_frame, text="Précision GPS max. (m):").grid(row=0, column=0, sticky="w", pady=2)
         acc_entry = ttk.Entry(self.settings_frame, textvariable=self.accuracy, width=10); acc_entry.grid(row=0, column=1, sticky="w", padx=5)
@@ -506,28 +539,24 @@ class App:
         ttk.Checkbutton(export_checks_frame, text="Google Earth KML", variable=self.export_kml).pack(side=tk.LEFT)
         ttk.Checkbutton(export_checks_frame, text="Graphique Vitesse", variable=self.export_graph).pack(side=tk.LEFT, padx=10)
 
-        # --- SORTIE ---
         self.output_frame = ttk.LabelFrame(self.main_frame, text="Fichiers de Sortie", padding="10")
         ttk.Label(self.output_frame, text="Dossier de sortie et nom du projet:").pack(fill=tk.X)
         out_entry_frame = ttk.Frame(self.output_frame); out_entry_frame.pack(fill=tk.X)
         ttk.Entry(out_entry_frame, textvariable=self.output_path).pack(side=tk.LEFT, expand=True, fill=tk.X)
         ttk.Button(out_entry_frame, text="...", width=3, command=self.select_output).pack(side=tk.LEFT, padx=(5,0))
 
-        # --- CROISEMENTS ---
         self.cross_ref_frame = ttk.LabelFrame(self.main_frame, text="Détection de Croisements", padding="10")
         ttk.Label(self.cross_ref_frame, text="Distance max (mètres):").grid(row=0, column=0, sticky="w", pady=2)
         ttk.Entry(self.cross_ref_frame, textvariable=self.cross_dist_var, width=10).grid(row=0, column=1, sticky="w", padx=5)
         ttk.Label(self.cross_ref_frame, text="Intervalle de temps max (secondes):").grid(row=1, column=0, sticky="w", pady=2)
         ttk.Entry(self.cross_ref_frame, textvariable=self.cross_time_var, width=10).grid(row=1, column=1, sticky="w", padx=5)
         
-        # --- BOUTONS D'ACTION ---
         self.action_frame = ttk.Frame(self.main_frame);
         self.launch_button = ttk.Button(self.action_frame, text="LANCER L'ANALYSE", command=self.start_analysis, style='Accent.TButton')
         self.launch_button.pack(side=tk.LEFT, expand=True, fill=tk.X, ipady=5)
         style = ttk.Style(); style.configure('Accent.TButton', font=('Helvetica', 10, 'bold'))
         self.open_folder_button = ttk.Button(self.action_frame, text="Ouvrir le dossier de sortie", command=self.open_output_folder)
 
-        # --- Barre de progression ---
         self.progress_bar = ttk.Progressbar(self.main_frame, orient='horizontal', length=100, mode='determinate')
         self.progress_label = ttk.Label(self.main_frame, text="Prêt", anchor="center")
 
