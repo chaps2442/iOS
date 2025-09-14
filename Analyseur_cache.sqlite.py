@@ -2,7 +2,7 @@
 # Analyse de cache.sqlite d'iOS - CORRECTION ERREUR SQL & INTERFACE
 # Authors: Vincent Chapeau & Burri Xavier
 # Finalisation & Stabilité: Gemini
-# Version: 0.64.0 - Correction erreur "no such column" & Restauration UI
+# Version: 0.65.0 - Correction crash Folium (TimestampedGeoJson)
 
 import sqlite3
 import folium
@@ -184,8 +184,7 @@ def run_analysis(devices, base_output_path, start_ts, end_ts, accuracy_threshold
         all_points_for_bounds = [];
         device_colors = {dev_id: color for dev_id, color in zip(df_export['Appareil_ID'].unique(), ['blue', 'red', 'green', 'purple', 'orange', 'darkred'])}
         
-        # --- COUCHE D'ANIMATION ---
-        fg_animation = folium.FeatureGroup(name="Animation des Trajets", show=True)
+        # --- COUCHE D'ANIMATION (doit être ajoutée directement à la carte) ---
         animation_features = []
         for device_id, group in df_export.groupby('Appareil_ID'):
             color = device_colors.get(device_id, 'gray')
@@ -203,8 +202,7 @@ def run_analysis(devices, base_output_path, start_ts, end_ts, accuracy_threshold
             TimestampedGeoJson({'type': 'FeatureCollection', 'features': animation_features},
                                 period='PT1H', add_last_point=True, auto_play=False, loop=False, 
                                 max_speed=10, loop_button=True, date_options='YYYY/MM/DD HH:mm:ss',
-                                time_slider_drag_update=True).add_to(fg_animation)
-        m.add_child(fg_animation)
+                                time_slider_drag_update=True).add_to(m) # CORRECTION: Ajout direct à 'm'
 
         # --- COUCHES STATIQUES PAR APPAREIL ---
         for device_id, group in df_export.groupby('Appareil_ID'):
@@ -274,7 +272,7 @@ Filtres appliqués:
 
 DESCRIPTION DES COUCHES (CARTE .HTML)
 -------------------------------------
-- **Animation des Trajets (Activé par défaut):** Affiche les points de tous les appareils de manière chronologique. Utilisez la ligne de temps en bas pour naviguer.
+- **Animation des Trajets (Toujours visible):** Affiche les points de tous les appareils de manière chronologique. Utilisez la ligne de temps en bas pour naviguer.
 - **Tracé (Lignes) (Activé par défaut):** Dessine une ligne continue reliant les points de trajet pour chaque appareil.
 - **Points de Trajet (Désactivé par défaut):** Affiche un petit marqueur sur chaque coordonnée GPS enregistrée.
 - **Directions (Angles) (Désactivé par défaut):** Montre une flèche sur chaque point indiquant le cap de l'appareil à ce moment.
@@ -316,7 +314,7 @@ def createToolTip(widget, text):
 
 class App:
     def __init__(self, root):
-        self.root = root; self.root.title("Analyseur GPS iOS - v0.64.0"); self.root.minsize(550, 750)
+        self.root = root; self.root.title("Analyseur GPS iOS - v0.65.0"); self.root.minsize(550, 750)
         self.devices, self.last_output_dir = [], None
         self.is_multi_mode = tk.BooleanVar(value=False); self.is_multi_mode.trace_add("write", self.toggle_mode)
         self.single_db_path, self.output_path = tk.StringVar(), tk.StringVar()
