@@ -2,7 +2,7 @@
 # Analyse de cache.sqlite d'iOS - AMÉLIORATIONS FINALES
 # Authors: Vincent Chapeau & Burri Xavier
 # Finalisation & Stabilité: Gemini
-# Version: 0.70.0 - Correction popups sur calque direction
+# Version: 0.72.0 - Auteurs en bas de page & Stabilité
 
 import sqlite3
 import folium
@@ -21,6 +21,7 @@ from math import radians, sin, cos, sqrt, atan2
 import os
 import subprocess
 import sys
+import shutil
 
 # --- FONCTION DE CALCUL DE DISTANCE ---
 def haversine(lat1, lon1, lat2, lon2):
@@ -231,7 +232,6 @@ def run_analysis(devices, base_output_path, start_ts, end_ts, accuracy_threshold
             folium.PolyLine(locations=points, color=color, weight=2.5, opacity=0.8).add_to(fg_lines)
 
             for _, row in trajet_group.iterrows():
-                # Création du popup détaillé pour tous les calques
                 popup_html = f"""
                 <div style="max-width: 300px;">
                 <b>Appareil:</b> {row['Appareil_ID']}<br>
@@ -250,8 +250,7 @@ def run_analysis(devices, base_output_path, start_ts, end_ts, accuracy_threshold
                 if pd.notna(row['Precision_GPS_m']) and row['Precision_GPS_m'] > 0:
                     folium.Circle(location=[row['Latitude'], row['Longitude']], radius=row['Precision_GPS_m'], color='blue', weight=1, fill=True, fill_color='blue', fill_opacity=0.2).add_to(fg_accuracy)
                 
-                # CORRECTION: Le popup est ajouté à la flèche de direction
-                if pd.notna(row['Direction_deg']): # On vérifie juste que la valeur existe (pas négative)
+                if pd.notna(row['Direction_deg']):
                     arrow_svg = f'<div style="transform: rotate({int(row["Direction_deg"])}deg); transform-origin: center;"><svg viewBox="0 0 24 24" fill="{color}" width="24px" height="24px"><path d="M12 2L2.5 21.5 12 17 21.5 21.5z"/></svg></div>'
                     folium.Marker(
                         location=[row['Latitude'], row['Longitude']], 
@@ -338,7 +337,7 @@ def createToolTip(widget, text):
 
 class App:
     def __init__(self, root):
-        self.root = root; self.root.title("Analyseur GPS iOS - v0.70.0"); self.root.minsize(550, 750)
+        self.root = root; self.root.title("Analyseur GPS iOS - v0.72.0"); self.root.minsize(550, 750)
         self.devices, self.last_output_dir = [], None
         self.is_multi_mode = tk.BooleanVar(value=False); self.is_multi_mode.trace_add("write", self.toggle_mode)
         self.single_db_path, self.output_path = tk.StringVar(), tk.StringVar()
@@ -351,9 +350,50 @@ class App:
         self.end_hour_var, self.end_min_var, self.end_sec_var = tk.StringVar(value="23"), tk.StringVar(value="59"), tk.StringVar(value="59")
         self.create_widgets(); self.toggle_mode()
 
+    def _handle_db_selection(self, original_path):
+        if not original_path: return None
+        wal_path = original_path + "-wal"
+        shm_path = original_path + "-shm"
+        wal_exists = os.path.exists(wal_path)
+        shm_exists = os.path.exists(shm_path)
+
+        if not wal_exists and not shm_exists:
+            return original_path
+
+        msg = (
+            "ATTENTION: Des fichiers temporaires (-wal et/ou -shm) ont été détectés.\n\n"
+            "L'ouverture directe de la base de données va intégrer ces fichiers et donc MODIFIER LE FICHIER ORIGINAL.\n\n"
+            "Voulez-vous créer une copie sécurisée (recommandé en forensique) et travailler dessus ?\n\n"
+            "• Oui : Crée une copie de la base et de ses fichiers temporaires et l'analyse.\n"
+            "• Non : Analyse les fichiers originaux (NON RECOMMANDÉ).\n"
+            "• Annuler : Annule la sélection."
+        )
+        choice = messagebox.askyesnocancel("Avertissement de Fichiers WAL/SHM", msg, icon='warning', parent=self.root)
+
+        if choice is None: return None
+        if choice is False: return original_path
+        if choice is True:
+            try:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                base, ext = os.path.splitext(original_path)
+                
+                new_path = f"{base}_copie_{timestamp}{ext}"
+
+                shutil.copy2(original_path, new_path)
+                if wal_exists: shutil.copy2(wal_path, new_path + "-wal")
+                if shm_exists: shutil.copy2(shm_path, new_path + "-shm")
+                
+                messagebox.showinfo("Copie Créée", f"Une copie sécurisée a été créée et sera utilisée pour l'analyse:\n{new_path}", parent=self.root)
+                return new_path
+            except Exception as e:
+                messagebox.showerror("Erreur de Copie", f"Impossible de créer la copie des fichiers:\n{e}", parent=self.root)
+                return None
+
     def select_single_db(self):
         path = filedialog.askopenfilename(title="Sélectionner cache.sqlite", filetypes=[("Fichiers SQLite", "*.sqlite"), ("Tous les fichiers", "*.*")])
-        if path: self.single_db_path.set(path)
+        final_path = self._handle_db_selection(path)
+        if final_path:
+            self.single_db_path.set(final_path)
 
     def select_output(self):
         path = filedialog.asksaveasfilename(title="Choisir le nom et le dossier de sortie", defaultextension="", filetypes=[("Tous les fichiers", "*.*")])
@@ -366,8 +406,9 @@ class App:
             messagebox.showwarning("ID Existant", "Cet ID est déjà utilisé.", parent=self.root)
             return
         path = filedialog.askopenfilename(title=f"Sélectionner cache.sqlite pour {dev_id}", filetypes=[("Fichiers SQLite", "*.sqlite"), ("Tous les fichiers", "*.*")])
-        if path:
-            self.devices.append({'id': dev_id, 'path': path})
+        final_path = self._handle_db_selection(path)
+        if final_path:
+            self.devices.append({'id': dev_id, 'path': final_path})
             self.update_device_list()
             
     def remove_device(self):
@@ -385,10 +426,11 @@ class App:
         all_frames = [
             self.mode_frame, self.single_db_frame, self.multi_db_frame,
             self.date_frame, self.settings_frame, self.output_frame, 
-            self.cross_ref_frame, self.action_frame
+            self.cross_ref_frame, self.action_frame, self.author_label
         ]
         for frame in all_frames: frame.pack_forget()
         is_multi = self.is_multi_mode.get()
+        
         self.mode_frame.pack(fill=tk.X, pady=5)
         if is_multi:
             self.multi_db_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
@@ -399,7 +441,10 @@ class App:
         self.output_frame.pack(fill=tk.X, pady=5)
         if is_multi:
             self.cross_ref_frame.pack(fill=tk.X, pady=5)
-        self.action_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=(10,0))
+        
+        # Pack bottom elements in reverse order for correct placement
+        self.author_label.pack(side=tk.BOTTOM, fill=tk.X)
+        self.action_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(10, 5))
 
     def _auto_focus(self, var, next_widget):
         if len(var.get()) >= 2:
@@ -551,11 +596,14 @@ class App:
         ttk.Label(self.cross_ref_frame, text="Intervalle de temps max (secondes):").grid(row=1, column=0, sticky="w", pady=2)
         ttk.Entry(self.cross_ref_frame, textvariable=self.cross_time_var, width=10).grid(row=1, column=1, sticky="w", padx=5)
         
-        self.action_frame = ttk.Frame(self.main_frame);
+        self.action_frame = ttk.Frame(self.main_frame)
         self.launch_button = ttk.Button(self.action_frame, text="LANCER L'ANALYSE", command=self.start_analysis, style='Accent.TButton')
         self.launch_button.pack(side=tk.LEFT, expand=True, fill=tk.X, ipady=5)
         style = ttk.Style(); style.configure('Accent.TButton', font=('Helvetica', 10, 'bold'))
         self.open_folder_button = ttk.Button(self.action_frame, text="Ouvrir le dossier de sortie", command=self.open_output_folder)
+
+        self.author_label = ttk.Label(self.main_frame, text="par V.Chapeau & X.Burri", style="Credits.TLabel")
+        style.configure('Credits.TLabel', anchor='e', foreground='gray', padding=(0,0,5,5))
 
         self.progress_bar = ttk.Progressbar(self.main_frame, orient='horizontal', length=100, mode='determinate')
         self.progress_label = ttk.Label(self.main_frame, text="Prêt", anchor="center")
